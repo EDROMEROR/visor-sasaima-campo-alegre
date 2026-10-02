@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SASAIMA · Visor de orientación</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0e13;color:#e8ecf1;font-family:Segoe UI,Arial,sans-serif}
+  #view{position:fixed;inset:0}
+  #panel{position:fixed;top:12px;left:12px;background:rgba(13,17,23,.88);border:1px solid #2a3340;border-radius:10px;padding:12px 14px;max-width:300px}
+  #panel h1{font-size:15px;margin:0 0 4px}
+  #panel .sub{font-size:12px;color:#9fb0c3;margin-bottom:8px}
+  #panel .row{font-size:12px;margin:3px 0}
+  #panel button{background:#1c2530;color:#e8ecf1;border:1px solid #33404f;border-radius:6px;padding:4px 9px;margin:3px 4px 3px 0;font-size:12px;cursor:pointer}
+  #panel button.on{background:#0e5aa8;border-color:#0e5aa8}
+  #panel label{font-size:12px;display:block;margin:3px 0}
+  #info{position:fixed;bottom:12px;left:12px;background:rgba(13,17,23,.88);border:1px solid #2a3340;border-radius:10px;padding:8px 12px;font-size:12px;max-width:340px}
+  #legend{position:fixed;bottom:12px;right:12px;background:rgba(13,17,23,.88);border:1px solid #2a3340;border-radius:10px;padding:8px 12px;font-size:12px}
+  .bar{height:10px;width:150px;border-radius:5px;background:linear-gradient(90deg,#2b6cb0,#38b26a,#e8c832,#c0392b);margin:4px 0}
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="panel">
+  <h1>SASAIMA · Orientación</h1>
+  <div class="sub" id="stats">cargando…</div>
+  <div class="row">Origen ENU: <span id="origen"></span></div>
+  <div>
+    <button id="b3d" class="on">3D</button><button id="btop">Cenital</button><button id="brot">⟳ auto</button>
+  </div>
+  <label><input type="checkbox" id="cCams" checked> <span id="lblCams">cámaras</span></label>
+  <label><input type="checkbox" id="cPath" checked> trayectoria de vuelo</label>
+  <label><input type="checkbox" id="cPts" checked> nube dispersa</label>
+  <label><input type="checkbox" id="cDense" checked> nube densa RGB</label>
+  <div class="row">Punto: <input type="range" id="sSize" min="1" max="8" step="0.5" value="2.5" style="width:120px"></div>
+</div>
+<div id="info">Clic en un cono naranja para ver la foto (etiqueta + posición ENU).</div>
+<div id="legend">Altura relativa (m)<div class="bar"></div><span id="zmin"></span> — <span id="zmax"></span></div>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script src="datos.js"></script>
+<script src="datos_densa.js"></script>
+<script>
+(function(){
+  var D = window.SASAIMA;
+  var pts = D.puntos, cams = D.camaras;
+  document.getElementById('lblCams').textContent = 'cámaras (' + cams.length + ')';
+  document.getElementById('origen').textContent =
+    D.origen.lat.toFixed(6)+', '+D.origen.lon.toFixed(6)+' h='+D.origen.h;
+  document.getElementById('stats').textContent =
+    cams.length+' cámaras · '+pts.length.toLocaleString('es')+' puntos · 20 fotos de maniobra excluidas';
+
+  var zs = pts.map(function(p){return p[2];});
+  var zmin = Math.min.apply(null,zs), zmax = Math.max.apply(null,zs);
+  document.getElementById('zmin').textContent = zmin.toFixed(0)+' m';
+  document.getElementById('zmax').textContent = zmax.toFixed(0)+' m';
+
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0e13);
+  var camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.5, 20000);
+  var renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth, innerHeight);
+  document.getElementById('view').appendChild(renderer.domElement);
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+
+  // nube dispersa con rampa de altura
+  var n = pts.length;
+  var pos = new Float32Array(n*3), col = new Float32Array(n*3);
+  var c1 = new THREE.Color(), cA = new THREE.Color(0x2b6cb0), cB = new THREE.Color(0x38b26a),
+      cC = new THREE.Color(0xe8c832), cD = new THREE.Color(0xc0392b);
+  for (var i=0;i<n;i++){
+    var p = pts[i];
+    pos[i*3]=p[0]; pos[i*3+1]=p[2]; pos[i*3+2]=-p[1]; // ENU -> three (y arriba, -z norte)
+    var t = (p[2]-zmin)/Math.max(1e-6,(zmax-zmin));
+    if (t<0.33) c1.copy(cA).lerp(cB, t/0.33);
+    else if (t<0.66) c1.copy(cB).lerp(cC, (t-0.33)/0.33);
+    else c1.copy(cC).lerp(cD, (t-0.66)/0.34);
+    col[i*3]=c1.r; col[i*3+1]=c1.g; col[i*3+2]=c1.b;
+  }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  g.setAttribute('color', new THREE.BufferAttribute(col,3));
+  var mat = new THREE.PointsMaterial({size:2.5, vertexColors:true, sizeAttenuation:true});
+  var cloud = new THREE.Points(g, mat);
+  scene.add(cloud);
+
+  // nube densa RGB (muestra, mismo marco ENU)
+  var dense = null, matD = null;
+  if (window.SASAIMA_DENSA && window.SASAIMA_DENSA.puntos.length){
+    var dp = window.SASAIMA_DENSA.puntos, m2 = dp.length;
+    var pos2 = new Float32Array(m2*3), col2 = new Float32Array(m2*3);
+    for (var j=0;j<m2;j++){
+      var q = dp[j];
+      pos2[j*3]=q[0]; pos2[j*3+1]=q[2]; pos2[j*3+2]=-q[1];
+      col2[j*3]=q[3]/255; col2[j*3+1]=q[4]/255; col2[j*3+2]=q[5]/255;
+    }
+    var g2 = new THREE.BufferGeometry();
+    g2.setAttribute('position', new THREE.BufferAttribute(pos2,3));
+    g2.setAttribute('color', new THREE.BufferAttribute(col2,3));
+    matD = new THREE.PointsMaterial({size:2.5, vertexColors:true, sizeAttenuation:true});
+    dense = new THREE.Points(g2, matD);
+    scene.add(dense);
+    cloud.visible = false;
+    document.getElementById('cPts').checked = false;
+    document.getElementById('stats').textContent =
+      cams.length+' cámaras · '+m2.toLocaleString('es')+' pts densos (de '+
+      window.SASAIMA_DENSA.total.toLocaleString('es')+') · '+pts.length.toLocaleString('es')+' dispersos';
+  }
+
+  function T(x,y,z){ return new THREE.Vector3(x, z, -y); } // ENU -> three
+  // cámaras: conos naranja + esferas
+  var camGroup = new THREE.Group();
+  var cones = [];
+  var up = new THREE.Vector3(0,1,0);
+  cams.forEach(function(c){
+    var P = T(c.pos[0], c.pos[1], c.pos[2]);
+    var dir = new THREE.Vector3(c.dir[0], c.dir[2], -c.dir[1]).normalize();
+    var len = 9;
+    var cone = new THREE.Mesh(new THREE.ConeGeometry(2.2, len, 10),
+      new THREE.MeshBasicMaterial({color:0xff8c1a}));
+    cone.position.copy(P).addScaledVector(dir, len/2);
+    cone.quaternion.setFromUnitVectors(up, dir.clone().negate());
+    cone.userData = c;
+    camGroup.add(cone); cones.push(cone);
+    var s = new THREE.Mesh(new THREE.SphereGeometry(1.1, 8, 8),
+      new THREE.MeshBasicMaterial({color:0xffb84d}));
+    s.position.copy(P); s.userData = c;
+    camGroup.add(s); cones.push(s);
+  });
+  scene.add(camGroup);
+  // trayectoria
+  var pathPts = cams.map(function(c){return T(c.pos[0],c.pos[1],c.pos[2]);});
+  var path = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pathPts),
+    new THREE.LineBasicMaterial({color:0x35c4ff}));
+  scene.add(path);
+
+  // grilla al nivel del suelo
+  g.computeBoundingBox();
+  var bb = g.boundingBox, size = new THREE.Vector3(); bb.getSize(size);
+  var grid = new THREE.GridHelper(Math.max(size.x,size.z)*1.15, 20, 0x3a4a5e, 0x232c38);
+  grid.position.y = bb.min.y - 2;
+  scene.add(grid);
+
+  var center = new THREE.Vector3(); bb.getCenter(center);
+  controls.target.copy(center);
+  function view3d(){
+    camera.position.set(center.x+size.x*0.7, center.y+size.length()*0.55, center.z+size.z*0.9);
+    controls.update();
+  }
+  function viewTop(){
+    camera.position.set(center.x, center.y+Math.max(size.x,size.z)*1.35, center.z+1);
+    controls.update();
+  }
+  view3d();
+
+  document.getElementById('b3d').onclick = function(){view3d(); this.classList.add('on'); document.getElementById('btop').classList.remove('on');};
+  document.getElementById('btop').onclick = function(){viewTop(); this.classList.add('on'); document.getElementById('b3d').classList.remove('on');};
+  var rot = false;
+  document.getElementById('brot').onclick = function(){rot=!rot; controls.autoRotate=rot; controls.autoRotateSpeed=1.2; this.classList.toggle('on',rot);};
+  document.getElementById('cCams').onchange = function(){camGroup.visible=this.checked;};
+  document.getElementById('cPath').onchange = function(){path.visible=this.checked;};
+  document.getElementById('cPts').onchange = function(){cloud.visible=this.checked;};
+  document.getElementById('cDense').onchange = function(){if(dense) dense.visible=this.checked;};
+  document.getElementById('sSize').oninput = function(){mat.size=parseFloat(this.value); if(matD) matD.size=parseFloat(this.value);};
+
+  var ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), info = document.getElementById('info');
+  renderer.domElement.addEventListener('click', function(ev){
+    mouse.x = (ev.clientX/innerWidth)*2-1; mouse.y = -(ev.clientY/innerHeight)*2+1;
+    ray.setFromCamera(mouse, camera);
+    var hit = ray.intersectObjects(cones)[0];
+    if (hit){
+      var c = hit.object.userData;
+      info.innerHTML = '<b>'+c.label+'.JPG</b> · E '+c.pos[0].toFixed(1)+' N '+c.pos[1].toFixed(1)+' h '+c.pos[2].toFixed(1)+' m (ENU local)';
+    }
+  });
+
+  addEventListener('resize', function(){
+    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+  (function anim(){ requestAnimationFrame(anim); controls.update(); renderer.render(scene,camera); })();
+})();
+</script>
+</body>
+</html>
